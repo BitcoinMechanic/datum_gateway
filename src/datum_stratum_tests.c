@@ -347,16 +347,67 @@ static void datum_stratum_string_request_id_tests(void) {
 static void datum_stratum_minimum_difficulty_configure_tests(void) {
 	T_DATUM_CLIENT_DATA client = {0};
 	T_DATUM_MINER_DATA miner = {0};
-	char configure[] =
+	char configure_missing[] =
 		"{\"id\":20,\"method\":\"mining.configure\","
 		"\"params\":[[\"minimum-difficulty\"],{}]}";
-	static const char expected[] =
-		"{\"error\":null,\"id\":20,\"result\":{\"minimum-difficulty\":false}}\n";
+	char configure_valid[] =
+		"{\"id\":21,\"method\":\"mining.configure\","
+		"\"params\":[[\"minimum-difficulty\"],"
+		"{\"minimum-difficulty.value\":4096}]}";
+	char configure_invalid[] =
+		"{\"id\":22,\"method\":\"mining.configure\","
+		"\"params\":[[\"minimum-difficulty\"],"
+		"{\"minimum-difficulty.value\":5000}]}";
+	static const char expected_missing[] =
+		"{\"error\":null,\"id\":20,\"result\":{\"minimum-difficulty\":"
+		"\"invalid power-of-two difficulty\"}}\n";
+	static const char expected_valid[] =
+		"{\"error\":null,\"id\":21,\"result\":{\"minimum-difficulty\":true}}\n";
+	static const char expected_invalid[] =
+		"{\"error\":null,\"id\":22,\"result\":{\"minimum-difficulty\":"
+		"\"invalid power-of-two difficulty\"}}\n";
 	
 	client.app_client_data = &miner;
-	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure) == 0);
-	datum_test(client.out_buf == (int)strlen(expected));
-	datum_test(!memcmp(client.w_buffer, expected, strlen(expected)));
+	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure_missing) == 0);
+	datum_test(client.out_buf == (int)strlen(expected_missing));
+	datum_test(!memcmp(client.w_buffer, expected_missing, strlen(expected_missing)));
+	client.out_buf = 0;
+	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure_valid) == 0);
+	datum_test(client.out_buf == (int)strlen(expected_valid));
+	datum_test(!memcmp(client.w_buffer, expected_valid, strlen(expected_valid)));
+	datum_test(miner.extension_minimum_difficulty);
+	datum_test(miner.extension_minimum_difficulty_value == 4096);
+	datum_test(datum_stratum_connection_vardiff_min(&miner) == 4096);
+	client.out_buf = 0;
+	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure_invalid) == 0);
+	datum_test(client.out_buf == (int)strlen(expected_invalid));
+	datum_test(!memcmp(client.w_buffer, expected_invalid, strlen(expected_invalid)));
+	datum_test(miner.extension_minimum_difficulty_value == 4096);
+}
+
+static void datum_stratum_split_local_upstream_difficulty_tests(void) {
+	T_DATUM_STRATUM_JOB datum_job = { .is_datum_job = true };
+	T_DATUM_STRATUM_JOB solo_job = { .is_datum_job = false };
+	unsigned char pool_target[32];
+	unsigned char insufficient_hash[32];
+	const int old_local_min = datum_config.stratum_v1_vardiff_min;
+	const uint64_t old_pool_min = datum_config.override_vardiff_min;
+
+	datum_config.stratum_v1_vardiff_min = 4096;
+	datum_config.override_vardiff_min = 131072;
+	datum_test(datum_stratum_connection_vardiff_min(NULL) == 4096);
+	datum_test(datum_stratum_upstream_pot(&datum_job, 4096) == 17);
+	datum_test(datum_stratum_upstream_pot(&solo_job, 4096) == 12);
+	datum_test(datum_stratum_upstream_pot(&datum_job, 262144) == 18);
+	datum_test(datum_blake2b_share_target(pool_target, 17));
+	datum_test(datum_stratum_share_meets_upstream_minimum(17, pool_target));
+	memcpy(insufficient_hash, pool_target, sizeof(insufficient_hash));
+	insufficient_hash[31]++;
+	datum_test(!datum_stratum_share_meets_upstream_minimum(17, insufficient_hash));
+	datum_test(!datum_stratum_share_meets_upstream_minimum(16, pool_target));
+
+	datum_config.stratum_v1_vardiff_min = old_local_min;
+	datum_config.override_vardiff_min = old_pool_min;
 }
 
 
@@ -506,6 +557,7 @@ void datum_stratum_mod_username_tests() {
 void datum_stratum_tests(void) {
 	datum_stratum_mod_username_tests();
 	datum_stratum_minimum_difficulty_configure_tests();
+	datum_stratum_split_local_upstream_difficulty_tests();
 	datum_stratum_string_request_id_tests();
 	datum_blake2b_coinbase_selection_tests();
 	datum_blake2b_h_not_zero_tests();

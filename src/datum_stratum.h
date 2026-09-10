@@ -222,7 +222,7 @@ typedef struct {
 	char last_auth_username[192];
 	
 	bool extension_minimum_difficulty;
-	double extension_minimum_difficulty_value;
+	uint64_t extension_minimum_difficulty_value;
 	
 	bool authorized;
 	bool subscribed;
@@ -233,6 +233,7 @@ typedef struct {
 	
 	uint8_t stratum_job_targets[MAX_STRATUM_JOBS][32];
 	uint64_t stratum_job_diffs[MAX_STRATUM_JOBS];
+	uint8_t stratum_job_pots[MAX_STRATUM_JOBS];
 	
 	unsigned char coinbase_selection;
 	
@@ -250,6 +251,7 @@ typedef struct {
 	bool quickdiff_active;
 	uint64_t quickdiff_value;
 	uint8_t quickdiff_target[32];
+	uint8_t quickdiff_pot;
 	
 	uint64_t forced_high_min_diff;
 	
@@ -273,6 +275,11 @@ bool datum_stratum_job_blake2b_commitment_from_txn(const T_DATUM_STRATUM_JOB *s,
 bool datum_stratum_job_blake2b_commitment(T_DATUM_STRATUM_JOB *s, const T_DATUM_STRATUM_COINBASE *cb, bool subsidy_only, unsigned char pot, unsigned char *commitment, unsigned char *coinb1);
 bool datum_stratum_share_is_unmasked_block(
 	const T_DATUM_STRATUM_JOB *job, const unsigned char *share_hash);
+uint64_t datum_stratum_connection_vardiff_min(const T_DATUM_MINER_DATA *miner);
+uint8_t datum_stratum_upstream_pot(const T_DATUM_STRATUM_JOB *job,
+	uint64_t local_diff);
+bool datum_stratum_share_meets_upstream_minimum(uint8_t committed_pot,
+	const unsigned char *share_hash);
 unsigned int datum_stratum_coinbase_index(const T_DATUM_STRATUM_THREADPOOL_DATA *sdata, const T_DATUM_MINER_DATA *miner, bool new_block);
 void stratum_job_merkle_root_calc(T_DATUM_STRATUM_JOB *s, unsigned char *coinbase_txn_hash, unsigned char *merkle_root_output);
 int assembleBlockAndSubmit(uint8_t *block_header, uint8_t *coinbase_txn, size_t coinbase_txn_size, T_DATUM_STRATUM_JOB *job, T_DATUM_STRATUM_THREADPOOL_DATA *sdata, const char *block_hash_hex, bool empty_work, const unsigned char *extranonce);

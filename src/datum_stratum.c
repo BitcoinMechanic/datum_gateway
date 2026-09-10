@@ -42,6 +42,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 #include <errno.h>
 #include <jansson.h>
 #include <inttypes.h>
@@ -797,6 +798,33 @@ void reset_vardiff_stats(T_DATUM_CLIENT_DATA *c) {
 	m->share_snap_tsms = m->sdata->loop_tsms;
 }
 
+uint64_t datum_stratum_connection_vardiff_min(const T_DATUM_MINER_DATA * const miner) {
+	if (miner && miner->extension_minimum_difficulty) {
+		return miner->extension_minimum_difficulty_value;
+	}
+	return datum_config.stratum_v1_vardiff_min;
+}
+
+uint8_t datum_stratum_upstream_pot(const T_DATUM_STRATUM_JOB * const job,
+	const uint64_t local_diff) {
+	uint64_t committed_diff = local_diff;
+	if (job && job->is_datum_job &&
+	    committed_diff < datum_config.override_vardiff_min) {
+		committed_diff = datum_config.override_vardiff_min;
+	}
+	return floorPoT(committed_diff);
+}
+
+bool datum_stratum_share_meets_upstream_minimum(const uint8_t committed_pot,
+	const unsigned char * const share_hash) {
+	unsigned char target[32];
+	const uint8_t pool_pot = floorPoT(datum_config.override_vardiff_min);
+
+	if (!share_hash || committed_pot < pool_pot ||
+	    !datum_blake2b_share_target(target, pool_pot)) return false;
+	return compare_hashes(share_hash, target) <= 0;
+}
+
 void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 	// Should be called at/around a share being accepted?
 	// before processing a mining notify? (for downward
@@ -805,6 +833,7 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 	uint64_t delta_tsms;
 	uint64_t ms_per_share;
 	uint64_t target_ms_share;
+	const uint64_t connection_min_diff = datum_stratum_connection_vardiff_min(m);
 	
 	// if we already have a diff change pending, don't do calcs again
 	if (m->current_diff != m->last_sent_diff) return;
@@ -825,8 +854,8 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 			if (m->current_diff < m->forced_high_min_diff) {
 				m->current_diff = m->forced_high_min_diff;
 			}
-			if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
-				m->current_diff = datum_config.stratum_v1_vardiff_min;
+			if (m->current_diff < connection_min_diff) {
+				m->current_diff = connection_min_diff;
 			}
 			reset_vardiff_stats(c);
 		}
@@ -876,8 +905,8 @@ void stratum_update_vardiff(T_DATUM_CLIENT_DATA *c, bool no_quick) {
 		if (m->current_diff < m->forced_high_min_diff) {
 			m->current_diff = m->forced_high_min_diff;
 		}
-		if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
-			m->current_diff = datum_config.stratum_v1_vardiff_min;
+		if (m->current_diff < connection_min_diff) {
+			m->current_diff = connection_min_diff;
 		}
 		reset_vardiff_stats(c);
 		return;
@@ -1143,11 +1172,9 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	// we must encode the current diff directly into the PoW.  This allows remote DATUM servers to accept
 	// our variable difficulty work (subject to the DATUM server provided global minimum)
 	
-	if (quickdiff) {
-		full_cb_txn[job->target_pot_index] = floorPoT(m->quickdiff_value);
-	} else {
-		full_cb_txn[job->target_pot_index] = floorPoT(m->stratum_job_diffs[g_job_index]);
-	}
+	const uint8_t committed_pot = quickdiff ? m->quickdiff_pot :
+		m->stratum_job_pots[g_job_index];
+	full_cb_txn[job->target_pot_index] = committed_pot;
 	
 	// time offset
 	ntime = json_array_get(params_obj, 3);
@@ -1339,7 +1366,9 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	}
 	
 	// work accepted
-	if (job->is_datum_job && !was_block && datum_protocol_pow_submit(c, job,
+	if (job->is_datum_job && !was_block &&
+	    datum_stratum_share_meets_upstream_minimum(committed_pot, share_hash) &&
+	    datum_protocol_pow_submit(c, job,
 		username_s, false, empty_work, quickdiff, block_header, job_diff, full_cb_txn,
 		full_cb_txn_size, share_hash, cb, extranonce_bin,
 		coinbase_index) != 0) {
@@ -1376,6 +1405,8 @@ int client_mining_configure(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	char sa[1024];
 	int i;
 	bool new_mdiff = false;
+	bool valid_mdiff = false;
+	uint64_t requested_mdiff = 0;
 	
 	if (!json_is_array(params_obj)) {
 		return -1;
@@ -1403,13 +1434,33 @@ int client_mining_configure(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 			}
 		}
 	}
+
+	if (new_mdiff && json_is_object(p2)) {
+		json_t * const mdiff = json_object_get(p2, "minimum-difficulty.value");
+		if (mdiff && json_is_number(mdiff)) {
+			const double d = json_number_value(mdiff);
+			if (isfinite(d) && d >= 1.0 &&
+			    d <= (double)(UINT64_C(1) << 63)) {
+				requested_mdiff = (uint64_t)d;
+				valid_mdiff = requested_mdiff == d &&
+					roundDownToPowerOfTwo_64(requested_mdiff) == requested_mdiff;
+			}
+		}
+	}
 	
 	char idbuf[160];
 	stratum_rpc_id_text(c, id, idbuf, sizeof(idbuf));
 	i = snprintf(sa, sizeof(sa), "{\"error\":null,\"id\":%s,\"result\":{", idbuf);
 	if (new_mdiff) {
-		// we don't currently support miner specified minimum difficulty.
-		i+= snprintf(&sa[i], sizeof(sa)-i, "\"minimum-difficulty\":false");
+		if (valid_mdiff) {
+			T_DATUM_MINER_DATA * const m = c->app_client_data;
+			m->extension_minimum_difficulty = true;
+			m->extension_minimum_difficulty_value = requested_mdiff;
+			i+= snprintf(&sa[i], sizeof(sa)-i, "\"minimum-difficulty\":true");
+		} else {
+			i+= snprintf(&sa[i], sizeof(sa)-i,
+				"\"minimum-difficulty\":\"invalid power-of-two difficulty\"");
+		}
 	}
 	i+= snprintf(&sa[i], sizeof(sa)-i, "}}\n");
 	
@@ -1520,13 +1571,6 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool 
 		stratum_update_vardiff(c, true);
 	}
 	
-	if (j->is_datum_job) {
-		// check if our client meets of exceeds the minimum datum diff
-		if (m->current_diff < datum_config.override_vardiff_min) {
-			m->current_diff = datum_config.override_vardiff_min;
-		}
-	}
-	
 	// if we have an updated difficulty to send, send it before we send the notify
 	// applies to quick and normal diff changes
 	if (m->last_sent_diff != m->current_diff) {
@@ -1538,14 +1582,17 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool 
 	if (!quickdiff) {
 		datum_blake2b_share_target(m->stratum_job_targets[j->global_index], floorPoT(m->last_sent_diff));
 		m->stratum_job_diffs[j->global_index] = m->last_sent_diff;
+		m->stratum_job_pots[j->global_index] = datum_stratum_upstream_pot(j, m->last_sent_diff);
 		m->quickdiff_active = false;
 	} else {
 		m->quickdiff_active = true;
 		m->quickdiff_value = m->last_sent_diff;
 		datum_blake2b_share_target(m->quickdiff_target, floorPoT(m->quickdiff_value));
+		m->quickdiff_pot = datum_stratum_upstream_pot(j, m->quickdiff_value);
 	}
-	tdiff = floorPoT(m->last_sent_diff);
-	share_nbits = datum_blake2b_share_nbits(tdiff);
+	tdiff = quickdiff ? m->quickdiff_pot : m->stratum_job_pots[j->global_index];
+	const uint8_t local_pot = floorPoT(m->last_sent_diff);
+	share_nbits = datum_blake2b_share_nbits(local_pot);
 	if (!share_nbits) return -1;
 	
 	// We'll use the client's send buffer for sanity, since in this environment it wont result in a partial send and we can just build up the string in the output buffer
@@ -1601,7 +1648,7 @@ int send_mining_set_difficulty(T_DATUM_CLIENT_DATA *c) {
 	T_DATUM_MINER_DATA * const m = c->app_client_data;
 	
 	if (!m->current_diff) {
-		m->current_diff = datum_config.stratum_v1_vardiff_min;
+		m->current_diff = datum_stratum_connection_vardiff_min(m);
 	}
 	
 	char stratum_difficulty[64];
@@ -1702,7 +1749,7 @@ int client_mining_subscribe(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	}
 	
 	// set default diff
-	m->current_diff = datum_config.stratum_v1_vardiff_min;
+	m->current_diff = datum_stratum_connection_vardiff_min(m);
 	
 	// default to the antminer workaround, which appears to be universally compatible
 	// except for NiceHash.
@@ -1721,8 +1768,8 @@ int client_mining_subscribe(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	
 	if ((datum_config.stratum_v1_fingerprint_miners) && (m->useragent[0])) {
 		datum_stratum_fingerprint_by_UA(m);
-		if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
-			m->current_diff = datum_config.stratum_v1_vardiff_min;
+		if (m->current_diff < datum_stratum_connection_vardiff_min(m)) {
+			m->current_diff = datum_stratum_connection_vardiff_min(m);
 		}
 	}
 	
