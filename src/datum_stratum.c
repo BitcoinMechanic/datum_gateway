@@ -799,7 +799,9 @@ void reset_vardiff_stats(T_DATUM_CLIENT_DATA *c) {
 }
 
 uint64_t datum_stratum_connection_vardiff_min(const T_DATUM_MINER_DATA * const miner) {
-	if (miner && miner->extension_minimum_difficulty) {
+	if (miner && miner->extension_minimum_difficulty &&
+	    miner->extension_minimum_difficulty_value >
+	    (uint64_t)datum_config.stratum_v1_vardiff_min) {
 		return miner->extension_minimum_difficulty_value;
 	}
 	return datum_config.stratum_v1_vardiff_min;
@@ -821,7 +823,7 @@ bool datum_stratum_share_meets_upstream_minimum(const uint8_t committed_pot,
 	const uint8_t pool_pot = floorPoT(datum_config.override_vardiff_min);
 
 	if (!share_hash || committed_pot < pool_pot ||
-	    !datum_blake2b_share_target(target, pool_pot)) return false;
+	    !datum_blake2b_share_target(target, committed_pot)) return false;
 	return compare_hashes(share_hash, target) <= 0;
 }
 
@@ -1405,6 +1407,7 @@ int client_mining_configure(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	char sa[1024];
 	int i;
 	bool new_mdiff = false;
+	bool has_mdiff_value = false;
 	bool valid_mdiff = false;
 	uint64_t requested_mdiff = 0;
 	
@@ -1437,6 +1440,7 @@ int client_mining_configure(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 
 	if (new_mdiff && json_is_object(p2)) {
 		json_t * const mdiff = json_object_get(p2, "minimum-difficulty.value");
+		has_mdiff_value = mdiff != NULL;
 		if (mdiff && json_is_number(mdiff)) {
 			const double d = json_number_value(mdiff);
 			if (isfinite(d) && d >= 1.0 &&
@@ -1457,9 +1461,11 @@ int client_mining_configure(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 			m->extension_minimum_difficulty = true;
 			m->extension_minimum_difficulty_value = requested_mdiff;
 			i+= snprintf(&sa[i], sizeof(sa)-i, "\"minimum-difficulty\":true");
-		} else {
+		} else if (has_mdiff_value) {
 			i+= snprintf(&sa[i], sizeof(sa)-i,
 				"\"minimum-difficulty\":\"invalid power-of-two difficulty\"");
+		} else {
+			i+= snprintf(&sa[i], sizeof(sa)-i, "\"minimum-difficulty\":false");
 		}
 	}
 	i+= snprintf(&sa[i], sizeof(sa)-i, "}}\n");

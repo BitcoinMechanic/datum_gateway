@@ -358,16 +358,23 @@ static void datum_stratum_minimum_difficulty_configure_tests(void) {
 		"{\"id\":22,\"method\":\"mining.configure\","
 		"\"params\":[[\"minimum-difficulty\"],"
 		"{\"minimum-difficulty.value\":5000}]}";
+	char configure_raise[] =
+		"{\"id\":23,\"method\":\"mining.configure\","
+		"\"params\":[[\"minimum-difficulty\"],"
+		"{\"minimum-difficulty.value\":131072}]}";
 	static const char expected_missing[] =
-		"{\"error\":null,\"id\":20,\"result\":{\"minimum-difficulty\":"
-		"\"invalid power-of-two difficulty\"}}\n";
+		"{\"error\":null,\"id\":20,\"result\":{\"minimum-difficulty\":false}}\n";
 	static const char expected_valid[] =
 		"{\"error\":null,\"id\":21,\"result\":{\"minimum-difficulty\":true}}\n";
 	static const char expected_invalid[] =
 		"{\"error\":null,\"id\":22,\"result\":{\"minimum-difficulty\":"
 		"\"invalid power-of-two difficulty\"}}\n";
+	static const char expected_raise[] =
+		"{\"error\":null,\"id\":23,\"result\":{\"minimum-difficulty\":true}}\n";
 	
 	client.app_client_data = &miner;
+	const int old_local_min = datum_config.stratum_v1_vardiff_min;
+	datum_config.stratum_v1_vardiff_min = 65536;
 	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure_missing) == 0);
 	datum_test(client.out_buf == (int)strlen(expected_missing));
 	datum_test(!memcmp(client.w_buffer, expected_missing, strlen(expected_missing)));
@@ -377,12 +384,18 @@ static void datum_stratum_minimum_difficulty_configure_tests(void) {
 	datum_test(!memcmp(client.w_buffer, expected_valid, strlen(expected_valid)));
 	datum_test(miner.extension_minimum_difficulty);
 	datum_test(miner.extension_minimum_difficulty_value == 4096);
-	datum_test(datum_stratum_connection_vardiff_min(&miner) == 4096);
+	datum_test(datum_stratum_connection_vardiff_min(&miner) == 65536);
 	client.out_buf = 0;
 	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure_invalid) == 0);
 	datum_test(client.out_buf == (int)strlen(expected_invalid));
 	datum_test(!memcmp(client.w_buffer, expected_invalid, strlen(expected_invalid)));
 	datum_test(miner.extension_minimum_difficulty_value == 4096);
+	client.out_buf = 0;
+	datum_test(datum_stratum_v1_socket_thread_client_cmd(&client, configure_raise) == 0);
+	datum_test(client.out_buf == (int)strlen(expected_raise));
+	datum_test(!memcmp(client.w_buffer, expected_raise, strlen(expected_raise)));
+	datum_test(datum_stratum_connection_vardiff_min(&miner) == 131072);
+	datum_config.stratum_v1_vardiff_min = old_local_min;
 }
 
 static void datum_stratum_split_local_upstream_difficulty_tests(void) {
@@ -405,6 +418,11 @@ static void datum_stratum_split_local_upstream_difficulty_tests(void) {
 	insufficient_hash[31]++;
 	datum_test(!datum_stratum_share_meets_upstream_minimum(17, insufficient_hash));
 	datum_test(!datum_stratum_share_meets_upstream_minimum(16, pool_target));
+	unsigned char committed_target[32];
+	datum_test(datum_blake2b_share_target(committed_target, 18));
+	/* A PoT-17 hash must not be forwarded for work committed to PoT 18. */
+	datum_test(!datum_stratum_share_meets_upstream_minimum(18, pool_target));
+	datum_test(datum_stratum_share_meets_upstream_minimum(18, committed_target));
 
 	datum_config.stratum_v1_vardiff_min = old_local_min;
 	datum_config.override_vardiff_min = old_pool_min;
