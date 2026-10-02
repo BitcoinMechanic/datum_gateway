@@ -820,9 +820,8 @@ uint8_t datum_stratum_upstream_pot(const T_DATUM_STRATUM_JOB * const job,
 bool datum_stratum_share_meets_upstream_minimum(const uint8_t committed_pot,
 	const unsigned char * const share_hash) {
 	unsigned char target[32];
-	const uint8_t pool_pot = floorPoT(datum_config.override_vardiff_min);
 
-	if (!share_hash || committed_pot < pool_pot ||
+       if (!share_hash ||
 	    !datum_blake2b_share_target(target, committed_pot)) return false;
 	return compare_hashes(share_hash, target) <= 0;
 }
