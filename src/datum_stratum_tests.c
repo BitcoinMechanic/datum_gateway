@@ -417,7 +417,8 @@ static void datum_stratum_split_local_upstream_difficulty_tests(void) {
 	memcpy(insufficient_hash, pool_target, sizeof(insufficient_hash));
 	insufficient_hash[31]++;
 	datum_test(!datum_stratum_share_meets_upstream_minimum(17, insufficient_hash));
-	datum_test(!datum_stratum_share_meets_upstream_minimum(16, pool_target));
+	// A raised live pool floor must not invalidate an older commitment.
+	datum_test(datum_stratum_share_meets_upstream_minimum(16, pool_target));
 	unsigned char committed_target[32];
 	datum_test(datum_blake2b_share_target(committed_target, 18));
 	/* A PoT-17 hash must not be forwarded for work committed to PoT 18. */
